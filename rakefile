@@ -1,0 +1,4 @@
+PACKAGE = 'driver/tool/run'
+NOCORTO = true
+LANGUAGE = 'c'
+require "#{ENV['CORTO_BUILD']}/package"
