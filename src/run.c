@@ -422,19 +422,18 @@ corto_int16 cortotool_run(int argc, char *argv[]) {
             corto_trace("run: found project directory '%s'", project);
             corto_id projectName;
             cortotool_stripPath(projectName, corto_cwd());
-            corto_asprintf(&appName, "./%s", projectName);
+            appName = corto_asprintf("./%s", projectName);
         }
     } else {
         corto_id projectName;
         cortotool_stripPath(projectName, corto_cwd());
-        corto_asprintf(&appName, "./%s", projectName);
+        appName = corto_asprintf("./%s", projectName);
     }
 
     if (runLocal && (corto_fileTest("rakefile") || corto_fileTest("project.json"))) {
         corto_id noPath;
         cortotool_stripPath(noPath, corto_cwd());
-        corto_asprintf(&appName, "./%s", noPath);
-        sprintf(appName, "./%s", noPath);
+        appName = corto_asprintf("./%s", noPath);
 
         /* Only build when in a project */
         if (corto_load("driver/tool/build", 2, (char*[]){"build", "--silent", NULL})) {
