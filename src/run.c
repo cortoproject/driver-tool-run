@@ -21,8 +21,6 @@
  */
 
 #include <corto/corto.h>
-#include <driver/tool/run/run.h>
-#include <driver/tool/build/build.h>
 #include <corto/argparse/argparse.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -35,7 +33,11 @@ typedef struct corto_fileMonitor {
     time_t mtime;
 } corto_fileMonitor;
 
-corto_fileMonitor* cortotool_monitorNew(char *file, char *lib) {
+static
+corto_fileMonitor* corto_monitor_new(
+    const char *file,
+    const char *lib)
+{
     corto_fileMonitor *mon = corto_alloc(sizeof(corto_fileMonitor));
     mon->file = corto_strdup(file);
     mon->lib = lib ? corto_strdup(lib) : NULL;
@@ -44,7 +46,20 @@ corto_fileMonitor* cortotool_monitorNew(char *file, char *lib) {
     return mon;
 }
 
-static void cortotool_addChangedLibrary(corto_ll *libs, corto_string lib) {
+static
+void corto_monitor_free(
+    corto_fileMonitor *mon)
+{
+    free(mon->file);
+    free(mon->lib);
+    free(mon);
+}
+
+static
+void corto_add_changed(
+    corto_ll *libs,
+    corto_string lib)
+{
     if (*libs && lib) {
         corto_iter iter = corto_ll_iter(*libs);
         while (corto_iter_hasNext(&iter)) {
@@ -61,7 +76,11 @@ static void cortotool_addChangedLibrary(corto_ll *libs, corto_string lib) {
     corto_ll_append(*libs, lib);
 }
 
-static corto_ll cortotool_getModified(corto_ll files, corto_ll changed) {
+static
+corto_ll corto_get_modified(
+    corto_ll files,
+    corto_ll changed)
+{
     corto_int32 i = 0;
     corto_ll libs = NULL;
 
@@ -77,13 +96,19 @@ static corto_ll cortotool_getModified(corto_ll files, corto_ll changed) {
             corto_fileMonitor *mon = corto_iter_next(&iter);
 
             if (stat(mon->file, &attr) < 0) {
-                printf("corto: failed to stat '%s' (%s)\n", mon->file, strerror(errno));
+                corto_error("failed to stat '%s' (%s)\n",
+                mon->file, strerror(errno));
             }
 
             if (mon->mtime) {
                 if (mon->mtime != attr.st_mtime) {
-                    cortotool_addChangedLibrary(&libs, mon->lib);
+                    corto_info("detected change in file '%s' (%d vs %d)", mon->file, mon->mtime, attr.st_mtime);
+                    corto_add_changed(&libs, mon->lib);
+                } else {
+                    corto_debug("no change in file '%s'", mon->file);
                 }
+            } else {
+                corto_debug("ignoring file '%s'", mon->file);
             }
             mon->mtime = attr.st_mtime;
 
@@ -94,8 +119,109 @@ static corto_ll cortotool_getModified(corto_ll files, corto_ll changed) {
     return libs;
 }
 
-static corto_ll cortotool_waitForChanges(corto_pid pid, corto_ll files, corto_ll changed) {
+static
+int compare_monitor(
+    void *o1,
+    void *o2)
+{
+    corto_fileMonitor
+        *m1 = o1,
+        *m2 = o2;
+
+    if (!strcmp(m1->file, m2->file)) {
+        return 0;
+    }
+    return 1;
+}
+
+static
+bool filter_file(
+    const char *file)
+{
+    char *ext = strchr(file, '.');
+
+    if (!corto_isdir(file) &&
+        strncmp(file, "test", 4) &&
+        strncmp(file, "bin", 3) &&
+        strcmp(file, "include/_type.h") &&
+        strcmp(file, "include/_load.h") &&
+        strcmp(file, "include/_interface.h") &&
+        strcmp(file, "include/_api.h") &&
+        strcmp(file, "include/_project.h") &&
+        strcmp(file, "include/.prefix") &&
+        !(file[0] == '.') &&
+        ext &&
+        strcmp(ext, ".so"))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static
+corto_ll corto_gather_files(
+    const char *project_dir,
+    const char *app_exec,
+    corto_ll old_files,
+    bool *files_removed)
+{
+    corto_ll result = corto_ll_new();
+    corto_iter it;
+
+    if (corto_dir_iter(project_dir, "//", &it))  {
+        goto error;
+    }
+
+    /* Find files that are not binaries, directories or build artefacts */
+    while (corto_iter_hasNext(&it)) {
+        char *file = corto_iter_next(&it);
+        if (filter_file(file)) {
+            corto_fileMonitor *m = corto_monitor_new(
+                strarg("%s/%s", project_dir, file), app_exec);
+            corto_ll_append(result, m);
+        }
+    }
+
+    /* Update new filelist with timestamps from old list */
+    if (old_files) {
+        corto_fileMonitor *m;
+        while ((m = corto_ll_takeFirst(old_files))) {
+            corto_fileMonitor *m_new = corto_ll_find(
+                result, compare_monitor, m);
+            if (m_new) {
+                m_new->mtime = m->mtime;
+            } else {
+                if (files_removed) {
+                    *files_removed = true;
+                }
+            }
+            corto_monitor_free(m);
+        }
+
+        corto_ll_free(old_files);
+    }
+
+    return result;
+error:
+    corto_ll_free(result);
+    return NULL;
+}
+
+static
+corto_ll corto_wait_for_changes(
+    corto_proc pid,
+    const char *project_dir,
+    const char *app_exec,
+    corto_ll changed)
+{
     corto_int32 i = 0;
+
+    /* Collect initial set of files in project directory */
+    corto_ll files = corto_gather_files(project_dir, app_exec, NULL, NULL);
+
+    /* Get initial timestamps for all files */
+    corto_get_modified(files, NULL);
 
     if (changed) {
         corto_ll_free(changed);
@@ -105,18 +231,31 @@ static corto_ll cortotool_waitForChanges(corto_pid pid, corto_ll files, corto_ll
     do {
         corto_sleep(0, 50000000);
 
-        /* Check if process is still running */
+        /* Check if process is still running every 50ms */
         if (pid) {
-            if ((retcode = corto_proccheck(pid, NULL))) {
+            if ((retcode = corto_proc_check(pid, NULL))) {
                 break;
             }
         }
 
         i++;
 
-        /* Only check files every second */
+        /* Check files every second */
         if (!(i % 20)) {
-            changed = cortotool_getModified(files, changed);
+            bool files_removed = false;
+
+            /* Refresh files, new files will show up with timestamp 0 */
+            files = corto_gather_files(
+                project_dir, app_exec, files, &files_removed);
+
+            /* Check for changes, new files will show up as changed */
+            changed = corto_get_modified(files, changed);
+
+            /* If files have been removed but no files have changed, create an
+             * empty list, so it will still trigger a rebuild */
+            if (!changed && files_removed) {
+                changed = corto_ll_new();
+            }
         } else {
             continue;
         }
@@ -125,40 +264,24 @@ static corto_ll cortotool_waitForChanges(corto_pid pid, corto_ll files, corto_ll
     return changed;
 }
 
-static int cortotool_addDirToMonitor(corto_string dir, corto_ll monitorList) {
-    corto_id cortoDir, srcDir;
-    sprintf(cortoDir, "%s/.corto", dir);
-    sprintf(srcDir, "%s/src", dir);
-
-    corto_ll files = corto_opendir(srcDir);
-    if (!files || !corto_fileTest(cortoDir)) {
-        corto_error("'%s' isn't a valid project directory", dir);
-        goto error;
-    }
-
-    corto_iter iter = corto_ll_iter(files);
-    while (corto_iter_hasNext(&iter)) {
-        corto_id srcFile;
-        corto_string file = corto_iter_next(&iter);
-        sprintf(srcFile, "%s/src/%s", dir, file);
-        corto_fileMonitor *mon = cortotool_monitorNew(srcFile, dir);
-        corto_ll_append(monitorList, mon);
-    }
-
-    corto_closedir(files);
-
-    return 0;
-error:
-    return -1;
-}
-
-static int cortotool_buildDependency(corto_string path) {
+static
+int corto_build_project(
+    const char *path)
+{
     corto_int8 procResult = 0;
 
     /* Build */
-    corto_pid pid = corto_procrun("corto", (char*[]){"corto", "build", path, "--silent", NULL});
-    if (corto_procwait(pid, &procResult) || procResult) {
-        printf("corto: failed to build '%s'\n", path);
+    corto_proc pid = corto_proc_run("bake", (char*[]){
+        "bake",
+        (char*)path,
+         NULL
+    });
+
+    if (corto_proc_wait(pid, &procResult) || procResult) {
+        corto_throw("failed to build '%s'", path);
+
+        /* Ensure that the binary folder is gone */
+        corto_rm(strarg("%s/bin", path));
         goto error;
     }
 
@@ -167,178 +290,95 @@ error:
     return -1;
 }
 
-void cortotool_toLibPath(char *location) {
-    char *ptr, ch;
-    ptr = &location[strlen(location) - 1];
-    while ((ch = *ptr) && (ptr >= location)) {
-        if (ch == '/') {
-            *ptr = '\0';
-            break;
-        }
-        ptr --;
-    }
-}
-
-static corto_ll cortotool_gatherFiles(void) {
-    corto_ll result = corto_ll_new();
-    corto_ll packages;
-
-    if (cortotool_addDirToMonitor(".", result)) {
-        goto error;
-    }
-
-    /* Walk packages */
-    packages = corto_loadGetPackages();
-    corto_iter iter = corto_ll_iter(packages);
-    while (corto_iter_hasNext(&iter)) {
-        corto_id sourceLink;
-        corto_string package = corto_iter_next(&iter);
-        corto_string file = corto_locate(package, NULL, CORTO_LOCATION_LIB);
-        if (!file) {
-            corto_error("package '%s' could not be located\n", package);
-            corto_error("  try: corto install %s", package);
-            goto error;
-        }
-        corto_fileMonitor *mon = cortotool_monitorNew(file, NULL);
-        if (file) {
-            corto_ll_append(result, mon);
-        } else {
-            printf("couldn't find file '%s'\n", file);
-        }
-
-        /* Check if there are source files available to monitor */
-        cortotool_toLibPath(file);
-        sprintf(sourceLink, "%s/source.txt", file);
-        if (corto_fileTest(sourceLink)) {
-            corto_string path = corto_fileLoad(sourceLink);
-
-            /* Strip newline */
-            path[strlen(path)-1] = '\0';
-            cortotool_buildDependency(path);
-
-            if (cortotool_addDirToMonitor(path, result)) {
-                goto error;
-            }
-        }
-    }
-
-    return result;
-error:
-    corto_ll_free(result);
-    return NULL;
-}
-
-corto_int16 cortotool_debug(int argc, char *argv[]) {
-    CORTO_UNUSED(argc);
-    CORTO_UNUSED(argv);
-
-    if (argc > 1) {
-        corto_chdir(argv[1]);
-    }
-
-    corto_pid pid = corto_procrun("lldb", (char*[]){".corto/app", NULL});
-    if (pid) {
-        corto_procwait(pid, NULL);
-    }
-
-    return 0;
-}
-
-corto_int16 cortotool_monitor(char *argv[]) {
-    corto_pid pid = 0;
-    corto_ll files;
+static
+corto_int16 corto_run_interactive(
+    const char *project_dir,
+    const char *app_exec,
+    char *argv[])
+{
+    corto_proc pid = 0;
     corto_ll changed = NULL;
     corto_uint32 retries = 0;
     corto_int32 rebuild = 0;
-    corto_int32 depErrors = 0;
-
-    files = cortotool_gatherFiles();
-    if (!files) {
-        return -1;
-    }
-
-    cortotool_getModified(files, NULL);
 
     /* Add $HOME/.corto/lib to LD_LIBRARY_PATH so that 3rd party libraries
      * installed to /usr/local/lib are also available when doing development
      * in local environment. */
     corto_setenv("LD_LIBRARY_PATH", "$HOME/.corto/lib:$LD_LIBRARY_PATH");
 
-    while (!retcode) {
+    while (true) {
 
-        /* Build the project */
-        if (!changed) {
-            corto_rm(".corto/app");
-            corto_load("driver/tool/build", 2, (char*[]){"build", "--silent", NULL});
+        if (!retries || changed) {
+            /* Build the project */
+            corto_build_project(project_dir);
             rebuild++;
-        } else {
-            depErrors = 0;
-            corto_iter iter = corto_ll_iter(changed);
-            while (corto_iter_hasNext(&iter)) {
-                corto_string lib = corto_iter_next(&iter);
-                if (lib && strcmp(lib, ".")) {
-                    printf("corto: '%s' changed, rebuilding\n", lib);
-                    if (!cortotool_buildDependency(lib)) {
-                        rebuild++;
-                    } else {
-                        depErrors++;
-                    }
-                } else {
-                    rebuild++;
-                }
-            }
-
-            /* Don't trigger on the changes in dependency binary file due to the builds */
-            changed = cortotool_getModified(files, changed);
-
-            /* Rebuild the app */
-            if (rebuild) {
-                corto_rm(".corto/app");
-                corto_load("driver/tool/build", 2, (char*[]){"build", "--silent", NULL});
-            } else if (depErrors) {
-                printf("corto: won't restart because dependency failed to rebuild\n");
-            }
         }
 
         if (pid && rebuild) {
             /* Send interrupt signal to process */
-            if (corto_prockill(pid, CORTO_SIGINT)) {
+            if (corto_proc_kill(pid, CORTO_SIGINT)) {
                 /* Wait until process has exited */
-                corto_procwait(pid, NULL);
+                corto_proc_wait(pid, NULL);
             }
             rebuild = 0;
             pid = 0;
         }
 
         /* Test whether the app exists, then start it */
-        if (corto_fileTest(".corto/app")) {
+        if (corto_file_test(app_exec)) {
             if (retries && !pid) {
-                printf("corto: restarting app (%dx)\n", retries);
+                corto_info("restarting app (%dx)", retries);
             }
 
-            /* Start process */
             if (!pid) {
-                pid = corto_procrun(".corto/app", &argv[1]);
+                /* Set CORTO_CONFIG while loading process */
+                corto_setenv("CORTO_CONFIG", "%s/config", project_dir);
+
+                /* Run process, ensure proc name is first argument */
+                {
+                    char *local_argv[1024] = {(char*)app_exec};
+                    int i = 1;
+                    while (argv[i]) {
+                        local_argv[i] = argv[i];
+                        i ++;
+                    }
+                    pid = corto_proc_run(app_exec, local_argv);
+                }
+
+                /* Unset CORTO_CONFIG so it doesn't mess up the build */
+                corto_setenv("CORTO_CONFIG", NULL);
             }
 
             /* Wait until either source changes, or executable finishes */
-            changed = cortotool_waitForChanges(pid, files, changed);
+            changed = corto_wait_for_changes(
+                pid, project_dir, app_exec, changed);
 
             /* Set pid to 0 if process has exited */
             if (retcode) {
                 pid = 0;
             }
         } else {
-            corto_error("fix your code!\n");
+            corto_error(
+                "build failed! (press Ctrl-C to exit"
+                " or change files to rebuild)\n");
 
             /* Wait for changed before trying again */
-            changed = cortotool_waitForChanges(0, files, changed);
+            changed = corto_wait_for_changes(
+                0, project_dir, app_exec, changed);
         }
 
         /* If the process segfaults, wait for changes and rebuild */
-        if ((retcode == 11) || (retcode == 6)) {
-            printf("corto: segmentation fault, fix your code!\n");
-            changed = cortotool_waitForChanges(0, files, changed);
+        if (retcode) {
+            if ((retcode == 11) || (retcode == 6)) {
+                corto_error("segmentation fault, fix your code!");
+            } else {
+                corto_info(
+                    "process has exited! (press Ctrl-C to exit"
+                    " or change files to restart)");
+            }
+
+            changed = corto_wait_for_changes(
+                0, project_dir, app_exec, changed);
             retcode = 0;
             pid = 0;
         }
@@ -353,25 +393,63 @@ corto_int16 cortotool_monitor(char *argv[]) {
     return 0;
 }
 
-static void cortotool_stripPath(char *buffer, char *str) {
-    char *ptr = str;
-    strcpy(buffer, ptr);
-    while ((ptr = strchr(ptr + 1, '/'))) {
-        strcpy(buffer, ptr + 1); /* A bit of redundancy for the sake of simplicity */
+static
+bool corto_is_valid_project(
+    const char *project)
+{
+    /* Test if directory exists */
+    if (corto_file_test(project) && corto_isdir(project)) {
+        /* Test if specified directory has project.json */
+        if (corto_file_test(strarg("%s/project.json", project))) {
+            /* Valid corto project found */
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static
+const char *corto_name_from_id(
+    const char *id)
+{
+    const char *result = strrchr(id, '/');
+    if (result) {
+        result ++;
+    } else {
+        result = id;
+    }
+    return result;
+}
+
+static
+void corto_str_strip(
+    char *str)
+{
+    int len = strlen(str);
+    char *ptr = &str[len - 1];
+
+    while (isspace(*ptr)) {
+        *ptr = '\0';
+        ptr --;
     }
 }
 
-corto_int16 cortotool_run(int argc, char *argv[]) {
-    corto_ll monitor, dir;
-    CORTO_UNUSED(argc);
-    corto_string appName = NULL;
-    corto_bool runLocal = TRUE;
+int cortomain(int argc, char *argv[]) {
+    char *config = "debug"; /* Configuration used for building */
+    char *app_id = NULL; /* Full id of application */
+    const char *app_name = NULL; /* Last element of application id */
+    char *app_exec = NULL; /* Application executable */
+    char *package_path = NULL; /* App location in public package repository */
+    char *project_dir = NULL; /* Project directory containing sources */
+
+    corto_ll interactive, dir;
 
     corto_argdata *data = corto_argparse(
       argv,
       (corto_argdata[]){
         {"$0", NULL, NULL}, /* Ignore 'run' */
-        {"--monitor", &monitor, NULL},
+        {"--interactive", &interactive, NULL},
         {"$1", &dir, NULL},
         {"*", NULL, NULL},
         {NULL}
@@ -379,93 +457,135 @@ corto_int16 cortotool_run(int argc, char *argv[]) {
     );
 
     if (!data) {
-        corto_error("%s", corto_lasterr());
+        corto_throw("invalid arguments");
         goto error;
     }
 
     if (dir) {
-        corto_string project = corto_ll_get(dir, 0);
+        app_id = corto_ll_get(dir, 0); /* Only accept one element */
 
-        /* Maybe this function fails, which is ok as it doesn't directly mean
-         * an error. */
-        corto_int16 ret = corto_chdir(project);
+        app_name = corto_name_from_id(app_id);
+
+        /* First check if passed argument is a valid directory */
+        if (corto_is_valid_project(app_id)) {
+            project_dir = app_id;
+        }
 
         /* If project is not found, lookup in package repositories */
-        if (ret) {
-            corto_id noPath;
-            cortotool_stripPath(noPath, project);
-
-            if (corto_fileTest(
-                "$CORTO_TARGET/bin/cortobin/$CORTO_VERSION/%s/%s",
-                project, noPath))
-            {
-                appName = corto_envparse(
-                    "$CORTO_TARGET/bin/cortobin/$CORTO_VERSION/%s/%s",
-                    project, noPath);
-            } else if (corto_fileTest(
-                "/usr/local/bin/cortobin/$CORTO_VERSION/%s/%s",
-                project, noPath))
-            {
-                appName = corto_envparse(
-                    "/usr/local/bin/cortobin/$CORTO_VERSION/%s/%s",
-                    project, noPath);
-            } else {
-                corto_error("%s", corto_lasterr());
+        if (!project_dir) {
+            package_path = corto_locate(app_id, NULL, CORTO_LOCATION_LIBPATH);
+            if (!package_path) {
+                corto_throw("failed to find application '%s'", app_id);
                 goto error;
             }
 
-            corto_lasterr(); /* Silence uncatched error */
+            /* Check if the package repository contains a link back to the
+             * location of the project. */
+            char *source_file = corto_asprintf("%s/source.txt", package_path);
+            if (corto_file_test(source_file)) {
+                project_dir = corto_file_load(source_file);
+                corto_str_strip(project_dir); /* Remove trailing whitespace */
 
-            corto_trace("run: found installed application '%s'", project);
-            runLocal = FALSE;
-        } else {
-            corto_trace("run: found project directory '%s'", project);
-            corto_id projectName;
-            cortotool_stripPath(projectName, corto_cwd());
-            appName = corto_asprintf("./%s", projectName);
+                if (!corto_is_valid_project(project_dir)) {
+                    /* Directory pointed to is not a valid corto project. Don't
+                     * give up yet, maybe the project got moved. */
+                    corto_warning(
+                        "package '%s' points to project folder '%s'"
+                        " which does not contain a valid corto project",
+                        app_id, project_dir);
+                    project_dir = NULL;
+                }
+            }
         }
     } else {
-        corto_id projectName;
-        cortotool_stripPath(projectName, corto_cwd());
-        appName = corto_asprintf("./%s", projectName);
-    }
+        /* Test if current directory is a valid project */
+        if (corto_is_valid_project(".")) {
+            project_dir = ".";
 
-    if (runLocal && (corto_fileTest("rakefile") || corto_fileTest("project.json"))) {
-        corto_id noPath;
-        cortotool_stripPath(noPath, corto_cwd());
-        appName = corto_asprintf("./%s", noPath);
+            /* Read project.json to get application id */
+            corto_object pkg = NULL;
+            char *json = corto_file_load("project.json");
+            if (corto_deserialize(&pkg, json, "text/json")) {
+                corto_throw("failed to parse 'project.json'");
+                goto error;
+            }
+            if (!pkg) {
+                corto_throw("failed to deserialize '%s'", json);
+                goto error;
+            }
 
-        /* Only build when in a project */
-        if (corto_load("driver/tool/build", 2, (char*[]){"build", "--silent", NULL})) {
-            return -1;
+            app_id = corto_strdup(corto_fullpath(NULL, pkg));
+            app_name = corto_name_from_id(app_id);
+
+            corto_delete(pkg);
+            free(json);
+        } else {
+            corto_throw("current directory is not a valid corto project");
+            goto error;
         }
     }
 
-    if (monitor) {
-        corto_trace("run: start monitor");
-        if (cortotool_monitor(argv)) {
+    if (project_dir) {
+        /* If project is found, point to executable in project bin */
+        app_exec = corto_asprintf(
+            "%s/bin/%s-%s/%s",
+            project_dir,
+            CORTO_PLATFORM_STRING,
+            config,
+            app_name);
+    } else {
+        /* If project directory is not found, locate the binary in the
+         * package repository. This only allows for running the
+         * application, not for interactive building */
+        app_exec = corto_locate(app_id, NULL, CORTO_LOCATION_APP);
+        if (!app_exec) {
+            /* We have no project dir and no executable. No idea how to
+             * build this project! */
+            corto_throw("executable not found for '%s'", app_id);
+            goto error;
+        }
+    }
+
+    if (interactive) {
+        if (!project_dir) {
+            corto_warning(
+              "don't know location of sourcefiles, interactive mode disabled");
+            interactive = NULL;
+        }
+    }
+
+    corto_info("starting app '%s'", app_id);
+    corto_info("  executable = '%s'", app_exec);
+    corto_info("  project path = '%s'", project_dir);
+    corto_info("  interactive = '%s'", interactive ? "true" : "false");
+
+    if (interactive) {
+        /* Run process & monitor source for changes */
+        if (corto_run_interactive(project_dir, app_exec, &argv[1])) {
             goto error;
         }
     } else {
-        corto_pid pid;
-        corto_trace("run: starting process '%s'", argv[1]);
+        /* Just run process */
+        corto_proc pid;
+        corto_trace("starting process '%s'", app_exec);
         if (argc > 1) {
-            pid = corto_procrun(appName, &argv[1]);
+            pid = corto_proc_run(app_exec, &argv[1]);
         } else {
-            pid = corto_procrun(appName, (char*[]){appName, NULL});
+            pid = corto_proc_run(app_exec, (char*[]){app_exec, NULL});
         }
         if (!pid) {
-            corto_error("failed to start process '%s'", appName);
+            corto_throw("failed to start process '%s'", app_exec);
             goto error;
         }
-        corto_ok("run: monitoring process '%s'", argv[1]);
+
+        corto_ok("waiting for process '%s'", argv[1]);
         corto_int8 result = 0, sig = 0;
-        if ((sig = corto_procwait(pid, &result)) || result) {
+        if ((sig = corto_proc_wait(pid, &result)) || result) {
             if (sig > 0) {
-                corto_error("process crashed (%d)", sig);
+                corto_throw("process crashed (%d)", sig);
                 goto error;
             } else {
-                corto_error("process returned %d", result);
+                corto_throw("process returned %d", result);
                 goto error;
             }
         }
@@ -477,20 +597,3 @@ corto_int16 cortotool_run(int argc, char *argv[]) {
 error:
     return -1;
 }
-
-void cortotool_runHelp(void) {
-    printf("Usage: corto run\n");
-    printf("       corto run <app>\n");
-    printf("\n");
-    printf("This command builds, runs and monitors your app. Corto will monitor both source\n");
-    printf("and dependencies (packages) of your app. If a change is detected\n");
-    printf("in any of these, the app is automatically rebuild and restarted.\n");
-    printf("\n");
-}
-
-
-int cortomain(int argc, char *argv[]) {
-
-    return 0;
-}
-

@@ -1,0 +1,12 @@
+{
+    "id": "driver/tool/run",
+    "type": "package",
+    "value": {
+        "description": "Build and run a corto project interactively",
+        "author": "Sander Mertens",
+        "version": "1.0.0",
+        "language": "c",
+        "managed": false,
+        "use": ["corto", "corto/argparse"]
+    }
+}
