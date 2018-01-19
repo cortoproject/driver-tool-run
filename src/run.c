@@ -505,7 +505,7 @@ int cortomain(int argc, char *argv[]) {
             /* Read project.json to get application id */
             corto_object pkg = NULL;
             char *json = corto_file_load("project.json");
-            if (corto_deserialize(&pkg, json, "text/json")) {
+            if (corto_deserialize(&pkg, "text/json", json)) {
                 corto_throw("failed to parse 'project.json'");
                 goto error;
             }
