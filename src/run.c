@@ -439,8 +439,8 @@ int cortomain(int argc, char *argv[]) {
     char *config = "debug"; /* Configuration used for building */
     char *app_id = NULL; /* Full id of application */
     const char *app_name = NULL; /* Last element of application id */
-    char *app_exec = NULL; /* Application executable */
-    char *package_path = NULL; /* App location in public package repository */
+    const char *app_exec = NULL; /* Application executable */
+    const char *package_path = NULL; /* App location in public package repository */
     char *project_dir = NULL; /* Project directory containing sources */
 
     corto_ll interactive, dir;
@@ -473,7 +473,7 @@ int cortomain(int argc, char *argv[]) {
 
         /* If project is not found, lookup in package repositories */
         if (!project_dir) {
-            package_path = corto_locate(app_id, NULL, CORTO_LOCATION_LIBPATH);
+            package_path = corto_locate(app_id, NULL, CORTO_LOCATE_PACKAGE);
             if (!package_path) {
                 corto_throw("failed to find application '%s'", app_id);
                 goto error;
@@ -537,7 +537,7 @@ int cortomain(int argc, char *argv[]) {
         /* If project directory is not found, locate the binary in the
          * package repository. This only allows for running the
          * application, not for interactive building */
-        app_exec = corto_locate(app_id, NULL, CORTO_LOCATION_APP);
+        app_exec = corto_locate(app_id, NULL, CORTO_LOCATE_APP);
         if (!app_exec) {
             /* We have no project dir and no executable. No idea how to
              * build this project! */
@@ -571,7 +571,7 @@ int cortomain(int argc, char *argv[]) {
         if (argc > 1) {
             pid = corto_proc_run(app_exec, &argv[1]);
         } else {
-            pid = corto_proc_run(app_exec, (char*[]){app_exec, NULL});
+            pid = corto_proc_run(app_exec, (char*[]){(char*)app_exec, NULL});
         }
         if (!pid) {
             corto_throw("failed to start process '%s'", app_exec);
