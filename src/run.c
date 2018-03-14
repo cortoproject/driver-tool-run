@@ -162,7 +162,7 @@ bool filter_file(
 static
 corto_ll corto_gather_files(
     const char *project_dir,
-    const char *app_exec,
+    const char *app_bin,
     corto_ll old_files,
     bool *files_removed)
 {
@@ -178,7 +178,7 @@ corto_ll corto_gather_files(
         char *file = corto_iter_next(&it);
         if (filter_file(file)) {
             corto_fileMonitor *m = corto_monitor_new(
-                strarg("%s/%s", project_dir, file), app_exec);
+                strarg("%s/%s", project_dir, file), app_bin);
             corto_ll_append(result, m);
         }
     }
@@ -212,13 +212,13 @@ static
 corto_ll corto_wait_for_changes(
     corto_proc pid,
     const char *project_dir,
-    const char *app_exec,
+    const char *app_bin,
     corto_ll changed)
 {
     corto_int32 i = 0;
 
     /* Collect initial set of files in project directory */
-    corto_ll files = corto_gather_files(project_dir, app_exec, NULL, NULL);
+    corto_ll files = corto_gather_files(project_dir, app_bin, NULL, NULL);
 
     /* Get initial timestamps for all files */
     corto_get_modified(files, NULL);
@@ -246,7 +246,7 @@ corto_ll corto_wait_for_changes(
 
             /* Refresh files, new files will show up with timestamp 0 */
             files = corto_gather_files(
-                project_dir, app_exec, files, &files_removed);
+                project_dir, app_bin, files, &files_removed);
 
             /* Check for changes, new files will show up as changed */
             changed = corto_get_modified(files, changed);
@@ -291,9 +291,37 @@ error:
 }
 
 static
-corto_int16 corto_run_interactive(
+corto_proc corto_run_exec(
+    const char *exec,
+    bool is_package,
+    char *local_argv[])
+{
+    if (!is_package) {
+        return corto_proc_run(exec, local_argv);
+    } else {
+        char *argv[256];
+
+        /* Copy arguments into vector */
+        argv[0] = "corto";
+        argv[1] = "--keep-alive";
+        argv[2] = "-l";
+        argv[3] = (char*)exec;
+
+        int i;
+        for (i = 0; (local_argv[i + 1] != NULL); i ++) {
+            argv[i + 4] = local_argv[i + 1];
+        }
+        argv[i + 4] = NULL;
+
+        return corto_proc_run("corto", argv);
+    }
+}
+
+static
+int16_t corto_run_interactive(
     const char *project_dir,
-    const char *app_exec,
+    const char *app_bin,
+    bool is_package,
     char *argv[])
 {
     corto_proc pid = 0;
@@ -325,7 +353,7 @@ corto_int16 corto_run_interactive(
         }
 
         /* Test whether the app exists, then start it */
-        if (corto_file_test(app_exec)) {
+        if (corto_file_test(app_bin)) {
             if (retries && !pid) {
                 corto_info("restarting app (%dx)", retries);
             }
@@ -336,13 +364,14 @@ corto_int16 corto_run_interactive(
 
                 /* Run process, ensure proc name is first argument */
                 {
-                    char *local_argv[1024] = {(char*)app_exec};
+                    char *local_argv[1024] = {(char*)app_bin};
                     int i = 1;
                     while (argv[i]) {
                         local_argv[i] = argv[i];
                         i ++;
                     }
-                    pid = corto_proc_run(app_exec, local_argv);
+
+                    pid = corto_run_exec(app_bin, is_package, local_argv);
                 }
 
                 /* Unset CORTO_CONFIG so it doesn't mess up the build */
@@ -351,7 +380,7 @@ corto_int16 corto_run_interactive(
 
             /* Wait until either source changes, or executable finishes */
             changed = corto_wait_for_changes(
-                pid, project_dir, app_exec, changed);
+                pid, project_dir, app_bin, changed);
 
             /* Set pid to 0 if process has exited */
             if (retcode) {
@@ -364,7 +393,7 @@ corto_int16 corto_run_interactive(
 
             /* Wait for changed before trying again */
             changed = corto_wait_for_changes(
-                0, project_dir, app_exec, changed);
+                0, project_dir, app_bin, changed);
         }
 
         /* If the process segfaults, wait for changes and rebuild */
@@ -378,7 +407,7 @@ corto_int16 corto_run_interactive(
             }
 
             changed = corto_wait_for_changes(
-                0, project_dir, app_exec, changed);
+                0, project_dir, app_bin, changed);
             retcode = 0;
             pid = 0;
         }
@@ -439,7 +468,8 @@ int cortomain(int argc, char *argv[]) {
     char *config = "debug"; /* Configuration used for building */
     char *app_id = NULL; /* Full id of application */
     const char *app_name = NULL; /* Last element of application id */
-    const char *app_exec = NULL; /* Application executable */
+    const char *app_bin = NULL; /* Application executable */
+    bool is_package = false;
     const char *package_path = NULL; /* App location in public package repository */
     char *project_dir = NULL; /* Project directory containing sources */
 
@@ -461,9 +491,7 @@ int cortomain(int argc, char *argv[]) {
         goto error;
     }
 
-    if (dir) {
-        app_id = corto_ll_get(dir, 0); /* Only accept one element */
-
+    if (dir && strcmp((app_id = corto_ll_get(dir, 0)), ".")) {
         app_name = corto_name_from_id(app_id);
 
         /* First check if passed argument is a valid directory */
@@ -517,6 +545,10 @@ int cortomain(int argc, char *argv[]) {
             app_id = corto_strdup(corto_fullpath(NULL, pkg));
             app_name = corto_name_from_id(app_id);
 
+            if (!strcmp(corto_idof(corto_typeof(pkg)), "package")) {
+                is_package = true;
+            }
+
             corto_delete(pkg);
             free(json);
         } else {
@@ -527,22 +559,35 @@ int cortomain(int argc, char *argv[]) {
 
     if (project_dir) {
         /* If project is found, point to executable in project bin */
-        app_exec = corto_asprintf(
-            "%s/bin/%s-%s/%s",
-            project_dir,
-            CORTO_PLATFORM_STRING,
-            config,
-            app_name);
+        if (!is_package) {
+            app_bin = corto_asprintf(
+                "%s/bin/%s-%s/%s",
+                project_dir,
+                CORTO_PLATFORM_STRING,
+                config,
+                app_name);
+        } else {
+            app_bin = corto_asprintf(
+                "%s/bin/%s-%s/lib%s.so",
+                project_dir,
+                CORTO_PLATFORM_STRING,
+                config,
+                app_name);
+        }
     } else {
         /* If project directory is not found, locate the binary in the
          * package repository. This only allows for running the
          * application, not for interactive building */
-        app_exec = corto_locate(app_id, NULL, CORTO_LOCATE_APP);
-        if (!app_exec) {
+        app_bin = corto_locate(app_id, NULL, CORTO_LOCATE_BIN);
+        if (!app_bin) {
             /* We have no project dir and no executable. No idea how to
              * build this project! */
             corto_throw("executable not found for '%s'", app_id);
             goto error;
+        }
+
+        if (corto_locate(app_id, NULL, CORTO_LOCATE_LIB)) {
+            is_package = true;
         }
     }
 
@@ -555,26 +600,33 @@ int cortomain(int argc, char *argv[]) {
     }
 
     corto_info("starting app '%s'", app_id);
-    corto_info("  executable = '%s'", app_exec);
+    corto_info("  executable = '%s'", app_bin);
     corto_info("  project path = '%s'", project_dir);
+    corto_info("  project kind = '%s'", is_package ? "package" : "application");
     corto_info("  interactive = '%s'", interactive ? "true" : "false");
 
     if (interactive) {
         /* Run process & monitor source for changes */
-        if (corto_run_interactive(project_dir, app_exec, &argv[1])) {
+        if (corto_run_interactive(project_dir, app_bin, is_package, &argv[1]))
+        {
             goto error;
         }
     } else {
         /* Just run process */
         corto_proc pid;
-        corto_trace("starting process '%s'", app_exec);
+        corto_trace("starting process '%s'", app_bin);
+
+        /* Set CORTO_CONFIG to process configuration directory */
+        corto_setenv("CORTO_CONFIG", "%s/config", project_dir);
+
         if (argc > 1) {
-            pid = corto_proc_run(app_exec, &argv[1]);
+            pid = corto_run_exec(app_bin, is_package, &argv[1]);
         } else {
-            pid = corto_proc_run(app_exec, (char*[]){(char*)app_exec, NULL});
+            pid = corto_run_exec(
+                app_bin, is_package, (char*[]){(char*)app_bin, NULL});
         }
         if (!pid) {
-            corto_throw("failed to start process '%s'", app_exec);
+            corto_throw("failed to start process '%s'", app_bin);
             goto error;
         }
 
