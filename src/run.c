@@ -525,39 +525,37 @@ int cortomain(int argc, char *argv[]) {
                 }
             }
         }
-    } else {
         /* Test if current directory is a valid project */
-        if (corto_is_valid_project(".")) {
-            project_dir = ".";
-
-            /* Read project.json to get application id */
-            corto_object pkg = NULL;
-            char *json = corto_file_load("project.json");
-            if (corto_deserialize(&pkg, "text/json", json)) {
-                corto_throw("failed to parse 'project.json'");
-                goto error;
-            }
-            if (!pkg) {
-                corto_throw("failed to deserialize '%s'", json);
-                goto error;
-            }
-
-            app_id = corto_strdup(corto_fullpath(NULL, pkg));
-            app_name = corto_name_from_id(app_id);
-
-            if (!strcmp(corto_idof(corto_typeof(pkg)), "package")) {
-                is_package = true;
-            }
-
-            corto_delete(pkg);
-            free(json);
-        } else {
-            corto_throw("current directory is not a valid corto project");
-            goto error;
-        }
+    } else if (corto_is_valid_project(".")) {
+        project_dir = ".";
+    } else {
+        corto_throw("current directory is not a valid corto project");
+        goto error;
     }
 
     if (project_dir) {
+        /* Read project.json to get application id */
+        corto_object pkg = NULL;
+        char *json = corto_file_load(strarg("%s/project.json", project_dir));
+        if (corto_deserialize(&pkg, "text/json", json)) {
+            corto_throw("failed to parse 'project.json'");
+            goto error;
+        }
+        if (!pkg) {
+            corto_throw("failed to deserialize '%s'", json);
+            goto error;
+        }
+
+        app_id = corto_strdup(corto_fullpath(NULL, pkg));
+        app_name = corto_name_from_id(app_id);
+
+        if (!strcmp(corto_idof(corto_typeof(pkg)), "package")) {
+            is_package = true;
+        }
+
+        corto_delete(pkg);
+        free(json);
+
         /* If project is found, point to executable in project bin */
         if (!is_package) {
             app_bin = corto_asprintf(
