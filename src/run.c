@@ -318,6 +318,29 @@ corto_proc corto_run_exec(
 }
 
 static
+char *corto_run_config(
+    const char *project_dir)
+{
+    char *result = NULL;
+
+    /* Discover if project has a configuration file or directory */
+    corto_ll files = corto_opendir(project_dir);
+    corto_iter it = corto_ll_iter(files);
+    while (corto_iter_hasNext(&it)) {
+        char *file = corto_iter_next(&it);
+        if (!strncmp(file, "config", 6)) {
+            if (!file[6] || file[6] == '.') {
+                result = corto_strdup(file);
+                break;
+            }
+        }
+    }
+    corto_closedir(files);
+
+    return result;
+}
+
+static
 int16_t corto_run_interactive(
     const char *project_dir,
     const char *app_bin,
@@ -328,6 +351,7 @@ int16_t corto_run_interactive(
     corto_ll changed = NULL;
     corto_uint32 retries = 0;
     corto_int32 rebuild = 0;
+    char *config_file = corto_run_config(project_dir);
 
     /* Add $HOME/.corto/lib to LD_LIBRARY_PATH so that 3rd party libraries
      * installed to /usr/local/lib are also available when doing development
@@ -360,7 +384,9 @@ int16_t corto_run_interactive(
 
             if (!pid) {
                 /* Set CORTO_CONFIG while loading process */
-                corto_setenv("CORTO_CONFIG", "%s/config", project_dir);
+                if (config_file) {
+                    corto_setenv("CORTO_CONFIG", "%s/%s", project_dir, config_file);
+                }
 
                 /* Run process, ensure proc name is first argument */
                 {
@@ -375,7 +401,9 @@ int16_t corto_run_interactive(
                 }
 
                 /* Unset CORTO_CONFIG so it doesn't mess up the build */
-                corto_setenv("CORTO_CONFIG", NULL);
+                if (config_file) {
+                    corto_setenv("CORTO_CONFIG", NULL);
+                }
             }
 
             /* Wait until either source changes, or executable finishes */
@@ -439,15 +467,22 @@ bool corto_is_valid_project(
 }
 
 static
-const char *corto_name_from_id(
+char *corto_name_from_id(
     const char *id)
 {
-    const char *result = strrchr(id, '/');
-    if (result) {
-        result ++;
-    } else {
-        result = id;
+    if (id[0] == '/') {
+        id ++;
     }
+
+    char *result = corto_strdup(id);
+    char *ptr, ch;
+
+    for (ptr = result; (ch = *ptr); ptr ++) {
+        if (ch == '/' || ch == '.') {
+            *ptr = '_';
+        }
+    }
+
     return result;
 }
 
@@ -597,11 +632,16 @@ int cortomain(int argc, char *argv[]) {
         }
     }
 
+    char *config_file = corto_run_config(project_dir);
+
     corto_info("starting app '%s'", app_id);
     corto_info("  executable = '%s'", app_bin);
     corto_info("  project path = '%s'", project_dir);
     corto_info("  project kind = '%s'", is_package ? "package" : "application");
     corto_info("  interactive = '%s'", interactive ? "true" : "false");
+    if (config_file) {
+        corto_info("  configuration = '%s'", config_file);
+    }
 
     if (interactive) {
         /* Run process & monitor source for changes */
@@ -615,7 +655,7 @@ int cortomain(int argc, char *argv[]) {
         corto_trace("starting process '%s'", app_bin);
 
         /* Set CORTO_CONFIG to process configuration directory */
-        corto_setenv("CORTO_CONFIG", "%s/config", project_dir);
+        corto_setenv("CORTO_CONFIG", "%s/%s", project_dir, config_file);
 
         if (argc > 1) {
             pid = corto_run_exec(app_bin, is_package, &argv[1]);
