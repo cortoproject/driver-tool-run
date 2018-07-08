@@ -303,15 +303,14 @@ corto_proc corto_run_exec(
 
         /* Copy arguments into vector */
         argv[0] = "corto";
-        argv[1] = "--keep-alive";
-        argv[2] = "-l";
-        argv[3] = (char*)exec;
+        argv[1] = "-l";
+        argv[2] = (char*)exec;
 
         int i;
         for (i = 0; (local_argv[i + 1] != NULL); i ++) {
-            argv[i + 4] = local_argv[i + 1];
+            argv[i + 3] = local_argv[i + 1];
         }
-        argv[i + 4] = NULL;
+        argv[i + 3] = NULL;
 
         return corto_proc_run("corto", argv);
     }
@@ -634,13 +633,13 @@ int cortomain(int argc, char *argv[]) {
 
     char *config_file = corto_run_config(project_dir);
 
-    corto_info("starting app '%s'", app_id);
-    corto_info("  executable = '%s'", app_bin);
-    corto_info("  project path = '%s'", project_dir);
-    corto_info("  project kind = '%s'", is_package ? "package" : "application");
-    corto_info("  interactive = '%s'", interactive ? "true" : "false");
+    corto_ok("starting app '%s'", app_id);
+    corto_ok("  executable = '%s'", app_bin);
+    corto_ok("  project path = '%s'", project_dir);
+    corto_ok("  project kind = '%s'", is_package ? "package" : "application");
+    corto_ok("  interactive = '%s'", interactive ? "true" : "false");
     if (config_file) {
-        corto_info("  configuration = '%s'", config_file);
+        corto_ok("  configuration = '%s'", config_file);
     }
 
     if (interactive) {
@@ -668,7 +667,7 @@ int cortomain(int argc, char *argv[]) {
             goto error;
         }
 
-        corto_ok("waiting for process '%s'", argv[1]);
+        corto_trace("waiting for process '%s'", argv[1]);
         corto_int8 result = 0, sig = 0;
         if ((sig = corto_proc_wait(pid, &result)) || result) {
             if (sig > 0) {
