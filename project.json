@@ -1,5 +1,5 @@
 {
-    "id": "driver/tool/run",
+    "id": "driver.tool.run",
     "type": "package",
     "value": {
         "description": "Build and run a corto project interactively",
@@ -7,6 +7,6 @@
         "version": "1.0.0",
         "language": "c",
         "managed": false,
-        "use": ["corto", "corto/argparse"]
+        "use": ["corto", "corto.util.argparse"]
     }
 }

@@ -21,7 +21,7 @@
  */
 
 #include <corto/corto.h>
-#include <corto/argparse/argparse.h>
+#include <corto/util/argparse/argparse.h>
 #include <sys/stat.h>
 #include <errno.h>
 
